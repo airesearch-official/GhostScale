@@ -1,0 +1,227 @@
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:path_provider/path_provider.dart';
+
+class UpscaleService {
+  static const String _modelPath =
+      'assets/models/Real-ESRGAN-General-x4v3_float.tflite';
+
+  // --- Advanced Tiling Configuration ---
+  // Input
+  static const int _tileSize = 128; // Fixed Model Input
+  static const int _effectiveInputSize = 100; // Trust center 100x100
+  static const int _padding = (_tileSize - _effectiveInputSize) ~/ 2; // 14
+  static const int _stride = _effectiveInputSize; // 100
+
+  // Output
+  static const int _scale = 4;
+  static const int _outputTileSize = _tileSize * _scale; // 512
+  static const int _effectiveOutputSize = _effectiveInputSize * _scale; // 400
+  static const int _outputPadding = _padding * _scale; // 56
+
+  Future<File?> upscaleImage(File imageFile) async {
+    final tempDir = await getTemporaryDirectory();
+    final modelFile = File('${tempDir.path}/model.tflite');
+
+    // Ensure model exists
+    if (!await modelFile.exists() || true) {
+      final byteData = await rootBundle.load(_modelPath);
+      await modelFile.writeAsBytes(
+        byteData.buffer.asUint8List(
+          byteData.offsetInBytes,
+          byteData.lengthInBytes,
+        ),
+      );
+    }
+
+    try {
+      // Use compute() to run in a background isolate
+      final resultPath = await compute(
+        _runInference,
+        _IsolateData(
+          imagePath: imageFile.path,
+          modelPath: modelFile.path,
+          outputPath: tempDir.path,
+        ),
+      );
+      return File(resultPath);
+    } catch (e) {
+      print("Upscale failed: $e");
+      rethrow;
+    }
+  }
+
+  // Static function for compute()
+  static Future<String> _runInference(_IsolateData data) async {
+    Interpreter? interpreter;
+    GpuDelegateV2? gpuDelegate;
+
+    try {
+      // 1. Initialize Interpreter & Delegate (Strict Lifecycle)
+      try {
+        gpuDelegate = GpuDelegateV2(
+          options: GpuDelegateOptionsV2(
+            isPrecisionLossAllowed: true, // Performance Tweak
+          ),
+        );
+        var options = InterpreterOptions()..addDelegate(gpuDelegate);
+        interpreter = Interpreter.fromFile(
+          File(data.modelPath),
+          options: options,
+        );
+        print("Initialized TFLite with GPU Delegate");
+      } catch (e) {
+        print("GPU Delegate failed, falling back to CPU: $e");
+        gpuDelegate = null; // Ensure null if failed
+        var options = InterpreterOptions()..threads = 4;
+        interpreter = Interpreter.fromFile(
+          File(data.modelPath),
+          options: options,
+        );
+      }
+
+      // 2. Load Image
+      final image = img.decodeImage(File(data.imagePath).readAsBytesSync())!;
+      final width = image.width;
+      final height = image.height;
+
+      final outputWidth = width * _scale;
+      final outputHeight = height * _scale;
+      final outputImage = img.Image(width: outputWidth, height: outputHeight);
+
+      // 3. Detect Layout (NCHW vs NHWC)
+      var inputTensor = interpreter!.getInputTensor(0);
+      var inputShape = inputTensor.shape;
+      bool inputNCHW = inputShape[1] == 3; // [1, 3, H, W] vs [1, H, W, 3]
+
+      // Resize Input Tensor to fixed 128x128
+      if (inputNCHW) {
+        interpreter.resizeInputTensor(0, [1, 3, _tileSize, _tileSize]);
+      } else {
+        interpreter.resizeInputTensor(0, [1, _tileSize, _tileSize, 3]);
+      }
+      interpreter.allocateTensors();
+
+      var outputTensor = interpreter.getOutputTensor(0);
+      var outputShape = outputTensor.shape;
+      bool outputNCHW = outputShape[1] == 3;
+
+      // Pre-allocate buffers
+      final inputFloats = Float32List(1 * _tileSize * _tileSize * 3);
+      final inputBuffer = inputFloats.buffer;
+      final outputFloats = Float32List(
+        1 * _outputTileSize * _outputTileSize * 3,
+      );
+      final outputBuffer = outputFloats.buffer;
+
+      // 4. Tiling Loop
+      for (var y = 0; y < height; y += _stride) {
+        for (var x = 0; x < width; x += _stride) {
+          // Calculate Source Tile Coordinates (128x128)
+          final startX = x - _padding;
+          final startY = y - _padding;
+
+          // Fill Input Buffer
+          if (inputNCHW) {
+            final planeSize = _tileSize * _tileSize;
+            for (var ty = 0; ty < _tileSize; ty++) {
+              for (var tx = 0; tx < _tileSize; tx++) {
+                final srcX = (startX + tx).clamp(0, width - 1);
+                final srcY = (startY + ty).clamp(0, height - 1);
+                final pixel = image.getPixel(srcX, srcY);
+                final index = ty * _tileSize + tx;
+                inputFloats[index] = pixel.r / 255.0;
+                inputFloats[planeSize + index] = pixel.g / 255.0;
+                inputFloats[planeSize * 2 + index] = pixel.b / 255.0;
+              }
+            }
+          } else {
+            int pIndex = 0;
+            for (var ty = 0; ty < _tileSize; ty++) {
+              for (var tx = 0; tx < _tileSize; tx++) {
+                final srcX = (startX + tx).clamp(0, width - 1);
+                final srcY = (startY + ty).clamp(0, height - 1);
+                final pixel = image.getPixel(srcX, srcY);
+                inputFloats[pIndex++] = pixel.r / 255.0;
+                inputFloats[pIndex++] = pixel.g / 255.0;
+                inputFloats[pIndex++] = pixel.b / 255.0;
+              }
+            }
+          }
+
+          // Run Inference
+          interpreter.runForMultipleInputs([inputBuffer], {0: outputBuffer});
+
+          // Write Output (Crop & Stitch)
+          for (var oy = 0; oy < _effectiveOutputSize; oy++) {
+            for (var ox = 0; ox < _effectiveOutputSize; ox++) {
+              // Coordinates in the 512x512 output tile
+              final tileY = oy + _outputPadding;
+              final tileX = ox + _outputPadding;
+
+              // Coordinates in the final image
+              final dstX = (x * _scale) + ox;
+              final dstY = (y * _scale) + oy;
+
+              if (dstX < outputWidth && dstY < outputHeight) {
+                double r, g, b;
+                if (outputNCHW) {
+                  final planeSize = _outputTileSize * _outputTileSize;
+                  final index = tileY * _outputTileSize + tileX;
+                  r = outputFloats[index];
+                  g = outputFloats[planeSize + index];
+                  b = outputFloats[planeSize * 2 + index];
+                } else {
+                  final index = (tileY * _outputTileSize + tileX) * 3;
+                  r = outputFloats[index];
+                  g = outputFloats[index + 1];
+                  b = outputFloats[index + 2];
+                }
+
+                outputImage.setPixelRgb(
+                  dstX,
+                  dstY,
+                  (r * 255).clamp(0, 255).toInt(),
+                  (g * 255).clamp(0, 255).toInt(),
+                  (b * 255).clamp(0, 255).toInt(),
+                );
+              }
+            }
+          }
+        }
+      }
+
+      final resultPath =
+          '${data.outputPath}/upscaled_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      // Save as JPG with 80% quality to reduce file size
+      File(
+        resultPath,
+      ).writeAsBytesSync(img.encodeJpg(outputImage, quality: 80));
+
+      return resultPath;
+    } catch (e, stack) {
+      print("Error in isolate: $e\n$stack");
+      rethrow;
+    } finally {
+      // STRICT CLEANUP
+      interpreter?.close();
+      gpuDelegate?.delete();
+    }
+  }
+}
+
+class _IsolateData {
+  final String imagePath;
+  final String modelPath;
+  final String outputPath;
+
+  _IsolateData({
+    required this.imagePath,
+    required this.modelPath,
+    required this.outputPath,
+  });
+}
