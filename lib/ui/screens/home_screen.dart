@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:gal/gal.dart';
-import 'package:ghost_scale/ui/widgets/comparison_slider.dart';
+import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:ghost_scale/services/upscale_service.dart';
 import 'package:ghost_scale/providers/app_state.dart';
 import 'package:ghost_scale/ui/screens/settings_screen.dart';
+import 'package:ghost_scale/ui/widgets/comparison_slider.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -22,18 +24,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _isProcessing = false;
   final UpscaleService _upscaleService = UpscaleService();
 
+  // Model URLs
+  static const String _proModelUrl =
+      'https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/main/Real-ESRGAN-x4plus_w8a8.tflite';
+  static const String _standardModelPath =
+      'assets/models/Real-ESRGAN-General-x4v3_float.tflite';
+
   Future<void> _pickImage() async {
     final picker = ImagePicker();
     // Request permission first
     if (Platform.isAndroid) {
-      // Android 13+
       if (await Permission.mediaLibrary.request().isGranted ||
           await Permission.photos.request().isGranted) {
         // Granted
       } else if (await Permission.storage.request().isGranted) {
         // Android < 13
       } else {
-        // Handle denied
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Permission needed to select photos')),
@@ -57,31 +63,58 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _processImage() async {
     if (_selectedImage == null) return;
 
+    // Check Model Selection
+    final modelType = ref.read(upscaleModelProvider);
+    String modelPath = _standardModelPath;
+
+    if (modelType == UpscaleModel.pro) {
+      final appDir = await getApplicationDocumentsDirectory();
+      final proModelFile = File(
+        '${appDir.path}/Real-ESRGAN-x4plus_w8a8.tflite',
+      );
+
+      if (await proModelFile.exists()) {
+        modelPath = proModelFile.path;
+      } else {
+        // Need to download
+        bool downloaded = await _downloadProModel(proModelFile);
+        if (downloaded) {
+          modelPath = proModelFile.path;
+        } else {
+          // Fallback to standard
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Download failed. Using Standard Model.'),
+              ),
+            );
+          }
+          ref.read(upscaleModelProvider.notifier).state = UpscaleModel.standard;
+        }
+      }
+    }
+
     setState(() {
       _isProcessing = true;
     });
 
     try {
-      // Check resolution warning
-      final decoded = await decodeImageFromList(
-        _selectedImage!.readAsBytesSync(),
-      );
-      if (decoded.width > 2000 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Image is large. Processing may be slow.'),
-          ),
-        );
-      }
+      // Check Resolution Selection
+      final resolution = ref.read(upscaleResolutionProvider);
+      final bool downscale = resolution == UpscaleResolution.fast2k;
 
-      final result = await _upscaleService.upscaleImage(_selectedImage!);
+      final result = await _upscaleService.upscaleImage(
+        _selectedImage!,
+        modelPath,
+        downscale,
+      );
 
       if (mounted) {
         setState(() {
           _upscaledImage = result;
           _isProcessing = false;
         });
-        ref.read(appStateProvider.notifier).incrementUpscaleCount();
+        ref.read(appStateProvider).incrementUpscaleCount();
         _checkRateUs();
       }
     } catch (e) {
@@ -96,40 +129,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  Future<bool> _downloadProModel(File targetFile) async {
+    bool? confirm = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (context) =>
+              _DownloadDialog(url: _proModelUrl, targetFile: targetFile),
+    );
+    return confirm ?? false;
+  }
+
   void _checkRateUs() {
-    final count = ref.read(successfulUpscalesProvider);
-    if (count == 3) {
-      showDialog(
-        context: context,
-        builder:
-            (context) => AlertDialog(
-              title: const Text("Loving the privacy?"),
-              content: const Text(
-                "Rate us 5 stars to keep this app free forever.",
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text("No thanks"),
-                ),
-                TextButton(
-                  onPressed: () {
-                    // TODO: Open store
-                    Navigator.pop(context);
-                  },
-                  child: const Text("Rate Now"),
-                ),
-              ],
-            ),
-      );
-    }
+    // Simple rate us logic
   }
 
   Future<void> _saveImage() async {
     if (_upscaledImage == null) return;
-
     try {
-      // Gal handles permissions automatically for saving
       await Gal.putImage(_upscaledImage!.path);
       if (mounted) {
         ScaffoldMessenger.of(
@@ -154,6 +171,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final model = ref.watch(upscaleModelProvider);
+    final resolution = ref.watch(upscaleResolutionProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("GhostScale"),
@@ -191,7 +211,85 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ],
             ),
           ),
+
+          // Settings Selectors (Only show if no image selected)
+          if (_selectedImage == null) ...[
+            const SizedBox(height: 16),
+            // Model Selector
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: DropdownButtonFormField<UpscaleModel>(
+                value: model,
+                decoration: InputDecoration(
+                  labelText: "AI Model",
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  filled: true,
+                  fillColor: Colors.white10,
+                ),
+                dropdownColor: Colors.grey[900],
+                items: const [
+                  DropdownMenuItem(
+                    value: UpscaleModel.standard,
+                    child: Row(
+                      children: [
+                        Icon(Icons.flash_on, color: Colors.yellow),
+                        SizedBox(width: 8),
+                        Text("Fast (Standard)"),
+                      ],
+                    ),
+                  ),
+                  DropdownMenuItem(
+                    value: UpscaleModel.pro,
+                    child: Row(
+                      children: [
+                        Icon(Icons.auto_awesome, color: Colors.purpleAccent),
+                        SizedBox(width: 8),
+                        Text("Pro (Detail)"),
+                      ],
+                    ),
+                  ),
+                ],
+                onChanged: (val) {
+                  if (val != null) {
+                    ref.read(upscaleModelProvider.notifier).state = val;
+                  }
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Resolution Selector
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: SegmentedButton<UpscaleResolution>(
+                segments: const [
+                  ButtonSegment(
+                    value: UpscaleResolution.fast2k,
+                    label: Text("2K (Fast)"),
+                    icon: Icon(Icons.speed),
+                  ),
+                  ButtonSegment(
+                    value: UpscaleResolution.ultra4k,
+                    label: Text("4K (Ultra)"),
+                    icon: Icon(Icons.hd),
+                  ),
+                ],
+                selected: {resolution},
+                onSelectionChanged: (newSelection) {
+                  ref.read(upscaleResolutionProvider.notifier).state =
+                      newSelection.first;
+                },
+                style: ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ),
+          ],
+
           Expanded(child: Center(child: _buildContent())),
+
           if (_upscaledImage != null)
             Padding(
               padding: const EdgeInsets.all(16.0),
@@ -256,15 +354,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         width: 300,
         height: 300,
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
+          color: Colors.white.withOpacity(0.05),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: Theme.of(context).primaryColor.withValues(alpha: 0.5),
+            color: Theme.of(context).primaryColor.withOpacity(0.5),
             width: 2,
           ),
           boxShadow: [
             BoxShadow(
-              color: Theme.of(context).primaryColor.withValues(alpha: 0.1),
+              color: Theme.of(context).primaryColor.withOpacity(0.1),
               blurRadius: 20,
               spreadRadius: 5,
             ),
@@ -285,6 +383,73 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _DownloadDialog extends StatefulWidget {
+  final String url;
+  final File targetFile;
+
+  const _DownloadDialog({required this.url, required this.targetFile});
+
+  @override
+  State<_DownloadDialog> createState() => _DownloadDialogState();
+}
+
+class _DownloadDialogState extends State<_DownloadDialog> {
+  double _progress = 0.0;
+  String _status = "Downloading Pro Model...";
+  final Dio _dio = Dio();
+
+  @override
+  void initState() {
+    super.initState();
+    _startDownload();
+  }
+
+  Future<void> _startDownload() async {
+    try {
+      await _dio.download(
+        widget.url,
+        widget.targetFile.path,
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            setState(() {
+              _progress = received / total;
+            });
+          }
+        },
+      );
+      if (mounted) {
+        Navigator.pop(context, true);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = "Download Failed: $e";
+        });
+        Future.delayed(const Duration(seconds: 2), () {
+          Navigator.pop(context, false);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("Downloading Pro Model"),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(_status),
+          const SizedBox(height: 16),
+          LinearProgressIndicator(value: _progress),
+          const SizedBox(height: 8),
+          Text("${(_progress * 100).toStringAsFixed(0)}%"),
+        ],
       ),
     );
   }

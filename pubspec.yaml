@@ -42,6 +42,7 @@ dependencies:
   before_after: ^3.0.0
   path_provider: ^2.1.4
   image: ^4.2.0
+  dio: ^5.9.0
 
 dev_dependencies:
   flutter_test:

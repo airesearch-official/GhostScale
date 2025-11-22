@@ -1,39 +1,50 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// Enums for Settings
+enum UpscaleModel { standard, pro }
+
+enum UpscaleResolution { fast2k, ultra4k }
+
+// Providers for Settings
+final upscaleModelProvider = StateProvider<UpscaleModel>(
+  (ref) => UpscaleModel.standard,
+);
+final upscaleResolutionProvider = StateProvider<UpscaleResolution>(
+  (ref) => UpscaleResolution.fast2k,
+);
+
 final sharedPreferencesProvider = Provider<SharedPreferences>((ref) {
   throw UnimplementedError();
 });
 
 final onboardingSeenProvider = StateProvider<bool>((ref) {
   final prefs = ref.watch(sharedPreferencesProvider);
-  return prefs.getBool('seenOnboarding') ?? false;
+  return prefs.getBool('onboarding_seen') ?? false;
 });
 
-final successfulUpscalesProvider = StateProvider<int>((ref) {
-  final prefs = ref.watch(sharedPreferencesProvider);
-  return prefs.getInt('successful_upscales') ?? 0;
-});
+final successfulUpscalesProvider = StateNotifierProvider<AppStateNotifier, int>(
+  (ref) {
+    final prefs = ref.watch(sharedPreferencesProvider);
+    return AppStateNotifier(prefs);
+  },
+);
 
-class AppStateNotifier extends StateNotifier<void> {
-  final Ref ref;
+class AppStateNotifier extends StateNotifier<int> {
+  final SharedPreferences _prefs;
 
-  AppStateNotifier(this.ref) : super(null);
+  AppStateNotifier(this._prefs) : super(_prefs.getInt('upscale_count') ?? 0);
 
-  Future<void> completeOnboarding() async {
-    final prefs = ref.read(sharedPreferencesProvider);
-    await prefs.setBool('seenOnboarding', true);
-    ref.read(onboardingSeenProvider.notifier).state = true;
+  void incrementUpscaleCount() {
+    state++;
+    _prefs.setInt('upscale_count', state);
   }
 
-  Future<void> incrementUpscaleCount() async {
-    final prefs = ref.read(sharedPreferencesProvider);
-    final current = ref.read(successfulUpscalesProvider);
-    await prefs.setInt('successful_upscales', current + 1);
-    ref.read(successfulUpscalesProvider.notifier).state = current + 1;
+  Future<void> completeOnboarding() async {
+    await _prefs.setBool('onboarding_seen', true);
   }
 }
 
-final appStateProvider = StateNotifierProvider<AppStateNotifier, void>((ref) {
-  return AppStateNotifier(ref);
-});
+final appStateProvider = Provider(
+  (ref) => ref.watch(successfulUpscalesProvider.notifier),
+);

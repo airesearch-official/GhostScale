@@ -13,25 +13,33 @@ class OnboardingScreen extends ConsumerWidget {
       pages: [
         PageViewModel(
           title: "100% Private",
-          body: "Your photos never leave this phone. No cloud uploads. No spying.",
-          image: const Center(child: Text("🛡️", style: TextStyle(fontSize: 100))),
+          body:
+              "Your photos never leave this phone. No cloud uploads. No spying.",
+          image: const Center(
+            child: Text("🛡️", style: TextStyle(fontSize: 100)),
+          ),
           decoration: _pageDecoration,
         ),
         PageViewModel(
           title: "Offline AI Power",
           body: "Uses your phone's processor. Works in Airplane Mode.",
-          image: const Center(child: Text("🚀", style: TextStyle(fontSize: 100))),
+          image: const Center(
+            child: Text("🚀", style: TextStyle(fontSize: 100)),
+          ),
           decoration: _pageDecoration,
         ),
         PageViewModel(
           title: "Unlimited & Free",
           body: "No subscriptions. No credit cards. Just clean pixels.",
-          image: const Center(child: Text("✨", style: TextStyle(fontSize: 100))),
+          image: const Center(
+            child: Text("✨", style: TextStyle(fontSize: 100)),
+          ),
           decoration: _pageDecoration,
         ),
       ],
       onDone: () {
-        ref.read(appStateProvider.notifier).completeOnboarding();
+        ref.read(appStateProvider).completeOnboarding();
+        ref.read(onboardingSeenProvider.notifier).state = true;
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const HomeScreen()),
         );
@@ -39,7 +47,10 @@ class OnboardingScreen extends ConsumerWidget {
       showSkipButton: true,
       skip: const Text("Skip"),
       next: const Text("Next"),
-      done: const Text("Get Started", style: TextStyle(fontWeight: FontWeight.w600)),
+      done: const Text(
+        "Get Started",
+        style: TextStyle(fontWeight: FontWeight.w600),
+      ),
       dotsDecorator: DotsDecorator(
         size: const Size.square(10.0),
         activeSize: const Size(20.0, 10.0),
@@ -56,9 +67,7 @@ class OnboardingScreen extends ConsumerWidget {
       doneStyle: TextButton.styleFrom(
         foregroundColor: Theme.of(context).primaryColor,
       ),
-      skipStyle: TextButton.styleFrom(
-        foregroundColor: Colors.white54,
-      ),
+      skipStyle: TextButton.styleFrom(foregroundColor: Colors.white54),
       nextStyle: TextButton.styleFrom(
         foregroundColor: Theme.of(context).primaryColor,
       ),
@@ -66,7 +75,11 @@ class OnboardingScreen extends ConsumerWidget {
   }
 
   static const _pageDecoration = PageDecoration(
-    titleTextStyle: TextStyle(fontSize: 28.0, fontWeight: FontWeight.w700, color: Colors.white),
+    titleTextStyle: TextStyle(
+      fontSize: 28.0,
+      fontWeight: FontWeight.w700,
+      color: Colors.white,
+    ),
     bodyTextStyle: TextStyle(fontSize: 19.0, color: Colors.white70),
     pageColor: Color(0xFF0A0A0A),
     imagePadding: EdgeInsets.zero,

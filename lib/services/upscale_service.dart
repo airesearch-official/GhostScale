@@ -7,9 +7,6 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 
 class UpscaleService {
-  static const String _modelPath =
-      'assets/models/Real-ESRGAN-General-x4v3_float.tflite';
-
   // --- Advanced Tiling Configuration ---
   // Input
   static const int _tileSize = 128; // Fixed Model Input
@@ -23,19 +20,27 @@ class UpscaleService {
   static const int _effectiveOutputSize = _effectiveInputSize * _scale; // 400
   static const int _outputPadding = _padding * _scale; // 56
 
-  Future<File?> upscaleImage(File imageFile) async {
+  Future<File?> upscaleImage(
+    File imageFile,
+    String modelPath,
+    bool downscale,
+  ) async {
     final tempDir = await getTemporaryDirectory();
-    final modelFile = File('${tempDir.path}/model.tflite');
+    String finalModelPath = modelPath;
 
-    // Ensure model exists
-    if (!await modelFile.exists() || true) {
-      final byteData = await rootBundle.load(_modelPath);
-      await modelFile.writeAsBytes(
-        byteData.buffer.asUint8List(
-          byteData.offsetInBytes,
-          byteData.lengthInBytes,
-        ),
-      );
+    // If it's an asset path, copy it to a temp file
+    if (modelPath.startsWith('assets/')) {
+      final modelFile = File('${tempDir.path}/temp_model.tflite');
+      if (!await modelFile.exists() || true) {
+        final byteData = await rootBundle.load(modelPath);
+        await modelFile.writeAsBytes(
+          byteData.buffer.asUint8List(
+            byteData.offsetInBytes,
+            byteData.lengthInBytes,
+          ),
+        );
+      }
+      finalModelPath = modelFile.path;
     }
 
     try {
@@ -44,8 +49,9 @@ class UpscaleService {
         _runInference,
         _IsolateData(
           imagePath: imageFile.path,
-          modelPath: modelFile.path,
+          modelPath: finalModelPath,
           outputPath: tempDir.path,
+          downscale: downscale,
         ),
       );
       return File(resultPath);
@@ -85,7 +91,17 @@ class UpscaleService {
       }
 
       // 2. Load Image
-      final image = img.decodeImage(File(data.imagePath).readAsBytesSync())!;
+      var image = img.decodeImage(File(data.imagePath).readAsBytesSync())!;
+
+      // Handle Downscaling (Fast 2K Mode)
+      if (data.downscale) {
+        image = img.copyResize(
+          image,
+          width: image.width ~/ 2,
+          height: image.height ~/ 2,
+        );
+      }
+
       final width = image.width;
       final height = image.height;
 
@@ -93,10 +109,12 @@ class UpscaleService {
       final outputHeight = height * _scale;
       final outputImage = img.Image(width: outputWidth, height: outputHeight);
 
-      // 3. Detect Layout (NCHW vs NHWC)
+      // 3. Detect Layout (NCHW vs NHWC) and Type (Float32 vs Uint8)
       var inputTensor = interpreter!.getInputTensor(0);
       var inputShape = inputTensor.shape;
+      var inputType = inputTensor.type;
       bool inputNCHW = inputShape[1] == 3; // [1, 3, H, W] vs [1, H, W, 3]
+      bool isQuantized = inputType == TensorType.uint8;
 
       // Resize Input Tensor to fixed 128x128
       if (inputNCHW) {
@@ -109,14 +127,22 @@ class UpscaleService {
       var outputTensor = interpreter.getOutputTensor(0);
       var outputShape = outputTensor.shape;
       bool outputNCHW = outputShape[1] == 3;
+      bool outputQuantized = outputTensor.type == TensorType.uint8;
 
       // Pre-allocate buffers
-      final inputFloats = Float32List(1 * _tileSize * _tileSize * 3);
-      final inputBuffer = inputFloats.buffer;
-      final outputFloats = Float32List(
-        1 * _outputTileSize * _outputTileSize * 3,
-      );
-      final outputBuffer = outputFloats.buffer;
+      // Input buffer size depends on type
+      final int inputSize = 1 * _tileSize * _tileSize * 3;
+      final ByteBuffer inputBuffer =
+          isQuantized
+              ? Uint8List(inputSize).buffer
+              : Float32List(inputSize).buffer;
+
+      // Output buffer size depends on type
+      final int outputSize = 1 * _outputTileSize * _outputTileSize * 3;
+      final ByteBuffer outputBuffer =
+          outputQuantized
+              ? Uint8List(outputSize).buffer
+              : Float32List(outputSize).buffer;
 
       // 4. Tiling Loop
       for (var y = 0; y < height; y += _stride) {
@@ -126,29 +152,60 @@ class UpscaleService {
           final startY = y - _padding;
 
           // Fill Input Buffer
-          if (inputNCHW) {
-            final planeSize = _tileSize * _tileSize;
-            for (var ty = 0; ty < _tileSize; ty++) {
-              for (var tx = 0; tx < _tileSize; tx++) {
-                final srcX = (startX + tx).clamp(0, width - 1);
-                final srcY = (startY + ty).clamp(0, height - 1);
-                final pixel = image.getPixel(srcX, srcY);
-                final index = ty * _tileSize + tx;
-                inputFloats[index] = pixel.r / 255.0;
-                inputFloats[planeSize + index] = pixel.g / 255.0;
-                inputFloats[planeSize * 2 + index] = pixel.b / 255.0;
+          if (isQuantized) {
+            final inputBytes = inputBuffer.asUint8List();
+            if (inputNCHW) {
+              final planeSize = _tileSize * _tileSize;
+              for (var ty = 0; ty < _tileSize; ty++) {
+                for (var tx = 0; tx < _tileSize; tx++) {
+                  final srcX = (startX + tx).clamp(0, width - 1);
+                  final srcY = (startY + ty).clamp(0, height - 1);
+                  final pixel = image.getPixel(srcX, srcY);
+                  final index = ty * _tileSize + tx;
+                  inputBytes[index] = pixel.r.toInt();
+                  inputBytes[planeSize + index] = pixel.g.toInt();
+                  inputBytes[planeSize * 2 + index] = pixel.b.toInt();
+                }
+              }
+            } else {
+              int pIndex = 0;
+              for (var ty = 0; ty < _tileSize; ty++) {
+                for (var tx = 0; tx < _tileSize; tx++) {
+                  final srcX = (startX + tx).clamp(0, width - 1);
+                  final srcY = (startY + ty).clamp(0, height - 1);
+                  final pixel = image.getPixel(srcX, srcY);
+                  inputBytes[pIndex++] = pixel.r.toInt();
+                  inputBytes[pIndex++] = pixel.g.toInt();
+                  inputBytes[pIndex++] = pixel.b.toInt();
+                }
               }
             }
           } else {
-            int pIndex = 0;
-            for (var ty = 0; ty < _tileSize; ty++) {
-              for (var tx = 0; tx < _tileSize; tx++) {
-                final srcX = (startX + tx).clamp(0, width - 1);
-                final srcY = (startY + ty).clamp(0, height - 1);
-                final pixel = image.getPixel(srcX, srcY);
-                inputFloats[pIndex++] = pixel.r / 255.0;
-                inputFloats[pIndex++] = pixel.g / 255.0;
-                inputFloats[pIndex++] = pixel.b / 255.0;
+            final inputFloats = inputBuffer.asFloat32List();
+            if (inputNCHW) {
+              final planeSize = _tileSize * _tileSize;
+              for (var ty = 0; ty < _tileSize; ty++) {
+                for (var tx = 0; tx < _tileSize; tx++) {
+                  final srcX = (startX + tx).clamp(0, width - 1);
+                  final srcY = (startY + ty).clamp(0, height - 1);
+                  final pixel = image.getPixel(srcX, srcY);
+                  final index = ty * _tileSize + tx;
+                  inputFloats[index] = pixel.r / 255.0;
+                  inputFloats[planeSize + index] = pixel.g / 255.0;
+                  inputFloats[planeSize * 2 + index] = pixel.b / 255.0;
+                }
+              }
+            } else {
+              int pIndex = 0;
+              for (var ty = 0; ty < _tileSize; ty++) {
+                for (var tx = 0; tx < _tileSize; tx++) {
+                  final srcX = (startX + tx).clamp(0, width - 1);
+                  final srcY = (startY + ty).clamp(0, height - 1);
+                  final pixel = image.getPixel(srcX, srcY);
+                  inputFloats[pIndex++] = pixel.r / 255.0;
+                  inputFloats[pIndex++] = pixel.g / 255.0;
+                  inputFloats[pIndex++] = pixel.b / 255.0;
+                }
               }
             }
           }
@@ -169,17 +226,35 @@ class UpscaleService {
 
               if (dstX < outputWidth && dstY < outputHeight) {
                 double r, g, b;
-                if (outputNCHW) {
-                  final planeSize = _outputTileSize * _outputTileSize;
-                  final index = tileY * _outputTileSize + tileX;
-                  r = outputFloats[index];
-                  g = outputFloats[planeSize + index];
-                  b = outputFloats[planeSize * 2 + index];
+
+                if (outputQuantized) {
+                  final outputBytes = outputBuffer.asUint8List();
+                  if (outputNCHW) {
+                    final planeSize = _outputTileSize * _outputTileSize;
+                    final index = tileY * _outputTileSize + tileX;
+                    r = outputBytes[index].toDouble() / 255.0;
+                    g = outputBytes[planeSize + index].toDouble() / 255.0;
+                    b = outputBytes[planeSize * 2 + index].toDouble() / 255.0;
+                  } else {
+                    final index = (tileY * _outputTileSize + tileX) * 3;
+                    r = outputBytes[index].toDouble() / 255.0;
+                    g = outputBytes[index + 1].toDouble() / 255.0;
+                    b = outputBytes[index + 2].toDouble() / 255.0;
+                  }
                 } else {
-                  final index = (tileY * _outputTileSize + tileX) * 3;
-                  r = outputFloats[index];
-                  g = outputFloats[index + 1];
-                  b = outputFloats[index + 2];
+                  final outputFloats = outputBuffer.asFloat32List();
+                  if (outputNCHW) {
+                    final planeSize = _outputTileSize * _outputTileSize;
+                    final index = tileY * _outputTileSize + tileX;
+                    r = outputFloats[index];
+                    g = outputFloats[planeSize + index];
+                    b = outputFloats[planeSize * 2 + index];
+                  } else {
+                    final index = (tileY * _outputTileSize + tileX) * 3;
+                    r = outputFloats[index];
+                    g = outputFloats[index + 1];
+                    b = outputFloats[index + 2];
+                  }
                 }
 
                 outputImage.setPixelRgb(
@@ -218,10 +293,12 @@ class _IsolateData {
   final String imagePath;
   final String modelPath;
   final String outputPath;
+  final bool downscale;
 
   _IsolateData({
     required this.imagePath,
     required this.modelPath,
     required this.outputPath,
+    required this.downscale,
   });
 }
