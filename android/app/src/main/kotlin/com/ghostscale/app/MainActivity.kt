@@ -1,4 +1,4 @@
-package com.example.ghost_scale
+package com.ghostscale.app
 
 import io.flutter.embedding.android.FlutterActivity
 

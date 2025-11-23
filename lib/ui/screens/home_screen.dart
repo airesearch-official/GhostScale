@@ -6,6 +6,7 @@ import 'package:gal/gal.dart';
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:ghost_scale/services/upscale_service.dart';
 import 'package:ghost_scale/providers/app_state.dart';
 import 'package:ghost_scale/ui/screens/settings_screen.dart';
@@ -98,6 +99,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _isProcessing = true;
     });
 
+    // Enable Wakelock
+    await WakelockPlus.enable();
+
     try {
       // Check Resolution Selection
       final resolution = ref.read(upscaleResolutionProvider);
@@ -114,6 +118,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _upscaledImage = result;
           _isProcessing = false;
         });
+        await WakelockPlus.disable();
         ref.read(appStateProvider).incrementUpscaleCount();
         _checkRateUs();
       }
@@ -122,6 +127,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         setState(() {
           _isProcessing = false;
         });
+        await WakelockPlus.disable();
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -218,44 +224,72 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             // Model Selector
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: DropdownButtonFormField<UpscaleModel>(
-                value: model,
-                decoration: InputDecoration(
-                  labelText: "AI Model",
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  filled: true,
-                  fillColor: Colors.white10,
-                ),
-                dropdownColor: Colors.grey[900],
-                items: const [
-                  DropdownMenuItem(
-                    value: UpscaleModel.standard,
-                    child: Row(
-                      children: [
-                        Icon(Icons.flash_on, color: Colors.yellow),
-                        SizedBox(width: 8),
-                        Text("Fast (Standard)"),
-                      ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DropdownButtonFormField<UpscaleModel>(
+                    value: model,
+                    decoration: InputDecoration(
+                      labelText: "AI Model",
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      filled: true,
+                      fillColor: Colors.white10,
                     ),
+                    dropdownColor: Colors.grey[900],
+                    items: const [
+                      DropdownMenuItem(
+                        value: UpscaleModel.standard,
+                        child: Row(
+                          children: [
+                            Icon(Icons.flash_on, color: Colors.yellow),
+                            SizedBox(width: 8),
+                            Text("Fast (Standard)"),
+                          ],
+                        ),
+                      ),
+                      DropdownMenuItem(
+                        value: UpscaleModel.pro,
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.auto_awesome,
+                              color: Colors.purpleAccent,
+                            ),
+                            SizedBox(width: 8),
+                            Text("Ultra (Experimental)"),
+                          ],
+                        ),
+                      ),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        ref.read(upscaleModelProvider.notifier).state = val;
+                      }
+                    },
                   ),
-                  DropdownMenuItem(
-                    value: UpscaleModel.pro,
-                    child: Row(
-                      children: [
-                        Icon(Icons.auto_awesome, color: Colors.purpleAccent),
-                        SizedBox(width: 8),
-                        Text("Pro (Detail)"),
-                      ],
+                  const SizedBox(height: 4),
+                  if (model == UpscaleModel.standard)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 12),
+                      child: Text(
+                        "Recommended for speed.",
+                        style: TextStyle(
+                          color: Colors.greenAccent,
+                          fontSize: 12,
+                        ),
+                      ),
                     ),
-                  ),
+                  if (model == UpscaleModel.pro)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 12),
+                      child: Text(
+                        "Warning: heavy processing. May take 2-3 minutes. Keep app open.",
+                        style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                      ),
+                    ),
                 ],
-                onChanged: (val) {
-                  if (val != null) {
-                    ref.read(upscaleModelProvider.notifier).state = val;
-                  }
-                },
               ),
             ),
             const SizedBox(height: 16),
@@ -266,12 +300,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 segments: const [
                   ButtonSegment(
                     value: UpscaleResolution.fast2k,
-                    label: Text("2K (Fast)"),
+                    label: FittedBox(child: Text("2K (Fast)")),
                     icon: Icon(Icons.speed),
                   ),
                   ButtonSegment(
                     value: UpscaleResolution.ultra4k,
-                    label: Text("4K (Ultra)"),
+                    label: FittedBox(child: Text("4K (Ultra)")),
                     icon: Icon(Icons.hd),
                   ),
                 ],
