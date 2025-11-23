@@ -30,11 +30,7 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
 
-flutter_launcher_icons:
-  android: "launcher_icon"
-  ios: true
-  image_path: "assets/screenshots/app_showcase.png" # Using screenshot as fallback icon source
-  min_sdk_android: 21
+
 
 flutter:
   uses-material-design: true
