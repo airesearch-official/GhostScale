@@ -5,6 +5,8 @@
 ![Offline](https://img.shields.io/badge/Offline-Ready-blue?style=for-the-badge)
 ![Open Source](https://img.shields.io/badge/Open-Source-orange?style=for-the-badge)
 
+![App Showcase](assets/screenshots/app_showcase.png)
+
 A proof-of-concept offline image upscaler built with Flutter and Real-ESRGAN. Upscales images locally on your device without sending data to the cloud.
 
 ## Features
